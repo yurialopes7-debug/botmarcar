@@ -38,7 +38,9 @@ async function connectBot() {
     if (connection === "close") {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log("❌ Conexão encerrada. Reconectando?", shouldReconnect);
-      if (shouldReconnect) connectBot();
+      if (shouldReconnect) {
+        setTimeout(() => connectBot(), 3000); // reconecta com delay de 3s para maior estabilidade
+      }
     } else if (connection === "open") {
       console.log("✅ Bot conectado!");
     }
@@ -85,7 +87,7 @@ async function connectBot() {
 
     // ---------------- Menus ----------------
     if (text.toLowerCase() === "!menu") {
-      await sock.sendMessage(from, { text: "📌 *Menu Normal*\n\n👉 !s\n👉 !ship @pessoa1 @pessoa2\n" });
+      await sock.sendMessage(from, { text: "📌 *Menu Normal*\n\n👉 !s\n👉 !ship @pessoa1 @pessoa2\n👉 !idgrupo\n" });
     }
 
     if (text.toLowerCase() === "!menux1") {
@@ -182,6 +184,15 @@ async function connectBot() {
           const listText = x1List.map(p => `@${p.split("@")[0]}`).join(" ");
           await sock.sendMessage(from, { text: `${extraText || "🔔 Chamada geral X1!"}\n\n${listText}`, mentions: x1List });
         }
+      }
+    }
+
+    // ---------------- Mostrar ID do Grupo ----------------
+    if (text.toLowerCase() === "!idgrupo") {
+      if (from.endsWith("@g.us")) {
+        await sock.sendMessage(from, { text: `🆔 O ID deste grupo é:\n${from}` }, { quoted: msg });
+      } else {
+        await sock.sendMessage(from, { text: "❌ Este comando só funciona em grupos." }, { quoted: msg });
       }
     }
 
