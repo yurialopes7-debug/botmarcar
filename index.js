@@ -2,6 +2,9 @@ const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, download
 const express = require("express");
 const qrcode = require("qrcode-terminal");
 const sharp = require("sharp");
+const fs = require("fs");
+const path = require("path");
+const { exec } = require("child_process");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -163,11 +166,22 @@ async function connectBot() {
       }
     }
 
-    if (text.toLowerCase() === "!marcarx1") {
+    if (text.toLowerCase().startsWith("!marcarx1")) {
       if (x1List.length === 0) {
         await sock.sendMessage(from, { text: "⚠️ A lista de X1 está vazia." });
       } else {
-        await sock.sendMessage(from, { text: "🔔 Chamada geral da lista de X1!", mentions: x1List });
+        const extraText = text.replace("!marcarx1", "").trim();
+
+        if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
+          const quoted = msg.message.extendedTextMessage.contextInfo;
+          await sock.sendMessage(from, {
+            forward: quoted.stanzaId ? { key: { remoteJid: from, id: quoted.stanzaId, fromMe: false }, message: quoted.quotedMessage } : quoted.quotedMessage,
+            mentions: x1List
+          }, { quoted: msg });
+        } else {
+          const listText = x1List.map(p => `@${p.split("@")[0]}`).join(" ");
+          await sock.sendMessage(from, { text: `${extraText || "🔔 Chamada geral X1!"}\n\n${listText}`, mentions: x1List });
+        }
       }
     }
 
@@ -194,17 +208,50 @@ async function connectBot() {
           return;
         }
 
-        const buffer = await downloadMediaMessage({ message: mediaMessage, key: mediaKey }, "buffer");
-        const metadata = await sharp(buffer).metadata();
-        const size = Math.min(metadata.width, metadata.height);
+        if (mediaMessage.imageMessage) {
+          // ----- Sticker de imagem -----
+          const buffer = await downloadMediaMessage({ message: mediaMessage, key: mediaKey }, "buffer");
+          const metadata = await sharp(buffer).metadata();
+          const size = Math.min(metadata.width, metadata.height);
 
-        const webpBuffer = await sharp(buffer)
-          .extract({ left: Math.floor((metadata.width - size) / 2), top: Math.floor((metadata.height - size) / 2), width: size, height: size })
-          .resize(512, 512)
-          .webp()
-          .toBuffer();
+          const webpBuffer = await sharp(buffer)
+            .extract({ left: Math.floor((metadata.width - size) / 2), top: Math.floor((metadata.height - size) / 2), width: size, height: size })
+            .resize(512, 512)
+            .webp()
+            .toBuffer();
 
-        await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
+          await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
+        } else if (mediaMessage.videoMessage) {
+          // ----- Sticker de vídeo -----
+          const buffer = await downloadMediaMessage({ message: mediaMessage, key: mediaKey }, "buffer");
+          const inputPath = path.join(__dirname, "input.mp4");
+          const outputPath = path.join(__dirname, "output.webp");
+          fs.writeFileSync(inputPath, buffer);
+
+          // Descobre dimensões do vídeo
+          exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "${inputPath}"`, (err, stdout) => {
+            if (err) {
+              console.error("Erro no ffprobe:", err);
+              return sock.sendMessage(from, { text: "❌ Erro ao analisar o vídeo." }, { quoted: msg });
+            }
+
+            const [width, height] = stdout.trim().split("x").map(Number);
+            const size = Math.min(width, height);
+
+            // Recorta quadrado e gera figurinha
+            exec(`ffmpeg -i "${inputPath}" -vf "crop=${size}:${size},scale=512:512,fps=15" -t 6 -an -c:v libwebp -preset picture -q:v 50 -loop 0 "${outputPath}"`, async (err) => {
+              if (err) {
+                console.error("Erro ao converter vídeo:", err);
+                await sock.sendMessage(from, { text: "❌ Erro ao criar figurinha de vídeo." }, { quoted: msg });
+                return;
+              }
+              const webpBuffer = fs.readFileSync(outputPath);
+              await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
+              fs.unlinkSync(inputPath);
+              fs.unlinkSync(outputPath);
+            });
+          });
+        }
       } catch (err) {
         console.error("Erro ao criar figurinha:", err);
         await sock.sendMessage(from, { text: "❌ Erro ao criar a figurinha." }, { quoted: msg });
@@ -223,7 +270,6 @@ async function connectBot() {
 
       const participants = metadata.participants.map(p => p.id);
 
-      // Se for resposta a uma mensagem
       if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
         const quoted = msg.message.extendedTextMessage.contextInfo;
         await sock.sendMessage(from, {
@@ -231,7 +277,6 @@ async function connectBot() {
           mentions: participants
         }, { quoted: msg });
       } else {
-        // Texto simples
         const extraText = text.replace("!marcar", "").trim() || "🔔 Marcação geral";
         await sock.sendMessage(from, { text: extraText, mentions: participants }, { quoted: msg });
       }
