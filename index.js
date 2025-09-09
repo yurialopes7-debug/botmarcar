@@ -41,7 +41,11 @@ async function connectBot() {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log("❌ Conexão encerrada. Reconectando?", shouldReconnect);
       if (shouldReconnect) {
+<<<<<<< HEAD
         setTimeout(() => connectBot(), 3000);
+=======
+        setTimeout(() => connectBot(), 3000); // reconecta com delay de 3s para maior estabilidade
+>>>>>>> 6eec1360a0ab78dd483a0e180c4925154d267a66
       }
     } else if (connection === "open") {
       console.log("✅ Bot conectado!");
@@ -89,7 +93,11 @@ async function connectBot() {
 
     // ---------------- Menus ----------------
     if (text.toLowerCase() === "!menu") {
+<<<<<<< HEAD
       await sock.sendMessage(from, { text: "📌 *Menu Normal*\n\n👉 !s\n👉 !ship @pessoa1 @pessoa2\n👉 !idgrupo\n👉 !ppt @pessoa\n👉 !top5\n👉 !youtube <link> (PV)\n👉 !piada\n👉 !curiosidade\n👉 !maisgado\n👉 !maiscorno\n👉 !rankgado\n👉 !rankcorno\n👉 !rankbonito\n👉 !rankfeio" });
+=======
+      await sock.sendMessage(from, { text: "📌 *Menu Normal*\n\n👉 !s\n👉 !ship @pessoa1 @pessoa2\n👉 !idgrupo\n" });
+>>>>>>> 6eec1360a0ab78dd483a0e180c4925154d267a66
     }
 
     if (text.toLowerCase() === "!menux1") {
@@ -436,11 +444,93 @@ async function connectBot() {
       }
     }
 
+<<<<<<< HEAD
     // ---------------- Dono Liga/Desliga ----------------
     if (sender === ownerNumber) {
       if (text.toLowerCase() === "!desligar") {
         botLigado = false;
         await sock.sendMessage(from, { text: "🛑 Bot desligado pelo dono." });
+=======
+    // ---------------- Mostrar ID do Grupo ----------------
+    if (text.toLowerCase() === "!idgrupo") {
+      if (from.endsWith("@g.us")) {
+        await sock.sendMessage(from, { text: `🆔 O ID deste grupo é:\n${from}` }, { quoted: msg });
+      } else {
+        await sock.sendMessage(from, { text: "❌ Este comando só funciona em grupos." }, { quoted: msg });
+      }
+    }
+
+    // ---------------- Sticker ----------------
+    if (text.toLowerCase() === "!s") {
+      try {
+        let mediaMessage;
+        let mediaKey = msg.key;
+
+        if (msg.message.extendedTextMessage?.contextInfo?.quotedMessage) {
+          mediaMessage = msg.message.extendedTextMessage.contextInfo.quotedMessage;
+          mediaKey = {
+            remoteJid: msg.key.remoteJid,
+            id: msg.message.extendedTextMessage.contextInfo.stanzaId,
+            fromMe: false,
+            participant: msg.message.extendedTextMessage.contextInfo.participant || msg.key.participant
+          };
+        } else {
+          mediaMessage = msg.message;
+        }
+
+        if (!mediaMessage.imageMessage && !mediaMessage.videoMessage) {
+          await sock.sendMessage(from, { text: "❌ Responda uma imagem ou vídeo com !s ou envie uma imagem com legenda !s." }, { quoted: msg });
+          return;
+        }
+
+        if (mediaMessage.imageMessage) {
+          // ----- Sticker de imagem -----
+          const buffer = await downloadMediaMessage({ message: mediaMessage, key: mediaKey }, "buffer");
+          const metadata = await sharp(buffer).metadata();
+          const size = Math.min(metadata.width, metadata.height);
+
+          const webpBuffer = await sharp(buffer)
+            .extract({ left: Math.floor((metadata.width - size) / 2), top: Math.floor((metadata.height - size) / 2), width: size, height: size })
+            .resize(512, 512)
+            .webp()
+            .toBuffer();
+
+          await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
+        } else if (mediaMessage.videoMessage) {
+          // ----- Sticker de vídeo -----
+          const buffer = await downloadMediaMessage({ message: mediaMessage, key: mediaKey }, "buffer");
+          const inputPath = path.join(__dirname, "input.mp4");
+          const outputPath = path.join(__dirname, "output.webp");
+          fs.writeFileSync(inputPath, buffer);
+
+          // Descobre dimensões do vídeo
+          exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "${inputPath}"`, (err, stdout) => {
+            if (err) {
+              console.error("Erro no ffprobe:", err);
+              return sock.sendMessage(from, { text: "❌ Erro ao analisar o vídeo." }, { quoted: msg });
+            }
+
+            const [width, height] = stdout.trim().split("x").map(Number);
+            const size = Math.min(width, height);
+
+            // Recorta quadrado e gera figurinha
+            exec(`ffmpeg -i "${inputPath}" -vf "crop=${size}:${size},scale=512:512,fps=15" -t 6 -an -c:v libwebp -preset picture -q:v 50 -loop 0 "${outputPath}"`, async (err) => {
+              if (err) {
+                console.error("Erro ao converter vídeo:", err);
+                await sock.sendMessage(from, { text: "❌ Erro ao criar figurinha de vídeo." }, { quoted: msg });
+                return;
+              }
+              const webpBuffer = fs.readFileSync(outputPath);
+              await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
+              fs.unlinkSync(inputPath);
+              fs.unlinkSync(outputPath);
+            });
+          });
+        }
+      } catch (err) {
+        console.error("Erro ao criar figurinha:", err);
+        await sock.sendMessage(from, { text: "❌ Erro ao criar a figurinha." }, { quoted: msg });
+>>>>>>> 6eec1360a0ab78dd483a0e180c4925154d267a66
       }
       if (text.toLowerCase() === "!ligar") {
         botLigado = true;
