@@ -1,7 +1,8 @@
-// index.js (completo) — suporte a efêmeras + ranks top 3 + todos comandos
-// + NOVO: !marcar com texto opcional OU citando mensagem (reenviar) — SEM exibir a lista de @ no corpo
+// index.js (revisado) — suporte a efêmeras + ranks top 3 + todos comandos
+// + !marcar com texto opcional OU citando mensagem (reenviar) — SEM exibir lista de @ no corpo
 // + RESTRITO: !marcar somente para administradores do grupo ou o dono (ownerNumber)
-// Alterações aplicadas: top5 persistente em top5.json, reconexão automática, não reler mensagens antigas (processa apenas mensagens a partir da reconexão)
+// Observação: precisa de ffmpeg no PATH para conversão de vídeos -> stickers animados
+// Observação: verificar versão do play-dl/playdl e ytdl se der erro no download do áudio
 
 const {
   default: makeWASocket,
@@ -15,15 +16,16 @@ const sharp = require("sharp");
 const fs = require("fs");
 const path = require("path");
 const { exec } = require("child_process");
-const ytdl = require("@distube/ytdl-core");
-const playdl = require("play-dl");
+const playdl = require("play-dl"); // ATENÇÃO: API muda entre versões
+// const ytdl = require("@distube/ytdl-core"); // removido se não for usado
+// const playdl = require("play-dl");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ---------------- Configurações fixas ----------------
 const ownerNumber = "553196929183@s.whatsapp.net"; // dono
-const welcomeGroupId = "120363419876804601@g.us";   // grupo de boas-vindas
+const welcomeGroupId = "120363419876804601@g.us"; // grupo de boas-vindas
 let botLigado = true;
 
 // ---------------- Persistência do X1 + top5 ----------------
@@ -69,9 +71,12 @@ function unwrapMessage(message) {
 
 /**
  * Extrai texto de uma mensagem (conversation, extended, captions, etc).
+ * Aceita um objeto tipo { message: ... } (como o upsert) ou um message já desembrulhado.
  */
 function getTextFromMsg(msg) {
-  const m = unwrapMessage(msg.message);
+  // msg pode ser: { message: <inner> } ou o inner message diretamente (no caso de fakeMsg)
+  const container = msg && msg.message !== undefined ? msg.message : msg;
+  const m = unwrapMessage(container);
   if (!m) return "";
   if (m.conversation) return m.conversation;
   if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
@@ -87,7 +92,8 @@ function getTextFromMsg(msg) {
  * Extrai menções da mensagem (se houver).
  */
 function getMentionsFromMsg(msg) {
-  const m = unwrapMessage(msg.message);
+  const container = msg && msg.message !== undefined ? msg.message : msg;
+  const m = unwrapMessage(container);
   return m?.extendedTextMessage?.contextInfo?.mentionedJid || [];
 }
 
@@ -102,20 +108,28 @@ async function isAdminInGroup(sock, groupJid, userJid) {
       .map((p) => p.id)
       .includes(userJid);
   } catch (e) {
+    console.error("Erro ao verificar admin:", e);
     return false;
   }
 }
 
 /**
  * Baixa mídia (image/video) e retorna como Buffer.
+ * Recebe o container interno (imageMessage ou videoMessage) ou a mensagem que contém esses campos.
  */
 async function downloadMediaAsBuffer(mediaContainer) {
-  const isImage = !!mediaContainer.imageMessage;
-  const isVideo = !!mediaContainer.videoMessage;
-  if (!isImage && !isVideo) throw new Error("Mídia não suportada");
+  // mediaContainer pode ser a mensagem interna (com imageMessage/videoMessage) ou diretamente imageMessage/videoMessage
+  const possible = mediaContainer.imageMessage ? mediaContainer.imageMessage : mediaContainer.videoMessage ? mediaContainer.videoMessage : mediaContainer;
+  const isImage = !!possible?.mimetype && possible?.mimetype.startsWith("image");
+  const isVideo = !!possible?.mimetype && possible?.mimetype.startsWith("video");
+  // fallback: checar por propriedades
+  const hasImageField = !!(mediaContainer && mediaContainer.imageMessage);
+  const hasVideoField = !!(mediaContainer && mediaContainer.videoMessage);
 
-  const type = isImage ? "image" : "video";
-  const inner = isImage ? mediaContainer.imageMessage : mediaContainer.videoMessage;
+  const type = hasImageField || isImage ? "image" : hasVideoField || isVideo ? "video" : null;
+  if (!type) throw new Error("Mídia não suportada");
+
+  const inner = hasImageField ? mediaContainer.imageMessage : hasVideoField ? mediaContainer.videoMessage : mediaContainer;
   const stream = await downloadContentFromMessage(inner, type);
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
@@ -124,19 +138,21 @@ async function downloadMediaAsBuffer(mediaContainer) {
 
 /**
  * Extrai a mensagem citada (se houver) a partir de uma msg.
+ * Retorna a mensagem já desembrulhada (inner).
  */
 function getQuotedMessageRaw(msg) {
-  const raw = unwrapMessage(msg.message);
-  return raw?.extendedTextMessage?.contextInfo?.quotedMessage
-    ? unwrapMessage(raw.extendedTextMessage.contextInfo.quotedMessage)
-    : null;
+  const container = msg && msg.message !== undefined ? msg.message : msg;
+  const raw = unwrapMessage(container);
+  const quoted = raw?.extendedTextMessage?.contextInfo?.quotedMessage;
+  return quoted ? unwrapMessage(quoted) : null;
 }
 
 /**
  * Extrai o JID do autor da mensagem citada (se fornecido no contextInfo).
  */
 function getQuotedParticipant(msg) {
-  const raw = unwrapMessage(msg.message);
+  const container = msg && msg.message !== undefined ? msg.message : msg;
+  const raw = unwrapMessage(container);
   return raw?.extendedTextMessage?.contextInfo?.participant || null;
 }
 
@@ -147,12 +163,12 @@ function getQuotedParticipant(msg) {
 function getQuotedText(msg) {
   const q = getQuotedMessageRaw(msg);
   if (!q) return "";
-  const fakeMsg = { message: q };
-  return getTextFromMsg(fakeMsg) || "";
+  return getTextFromMsg(q) || "";
 }
 
 /**
  * Informa se a mensagem citada contém mídia (image/video) e retorna detalhes.
+ * Retorna { hasMedia: false } se não houver mídia.
  */
 function getQuotedMediaInfo(msg) {
   const q = getQuotedMessageRaw(msg);
@@ -174,7 +190,7 @@ function getQuotedMediaInfo(msg) {
 }
 
 /**
- * Envia uma re-postagem da mídia citada (image/video) mantendo (ou não) a legenda,
+ * Reenvia mídia citada (imagem/vídeo) mantendo (ou não) a legenda,
  * mas adicionando "mentions" de todos participantes do grupo.
  * Requisito do usuário: não imprimir a lista de @ no corpo explicitamente.
  */
@@ -190,7 +206,7 @@ async function resendQuotedMediaWithMentions(sock, chatId, msg, mentions) {
         chatId,
         {
           image: buf,
-          caption: mediaInfo.caption || "", // não incluir @s na legenda
+          caption: mediaInfo.caption || "",
           mentions,
         },
         { quoted: msg }
@@ -231,11 +247,12 @@ async function makeStickerFromImageBuffer(buffer) {
 
 /**
  * Cria figurinha animada de vídeo (até 6s, 15fps, crop central quadrado, 512x512).
+ * Requer ffmpeg instalado no sistema.
  */
 function makeStickerFromVideoBuffer(buffer) {
   return new Promise((resolve, reject) => {
-    const inputPath = path.join(__dirname, "input.mp4");
-    const outputPath = path.join(__dirname, "output.webp");
+    const inputPath = path.join(__dirname, "input_temp.mp4");
+    const outputPath = path.join(__dirname, "output_temp.webp");
     try {
       fs.writeFileSync(inputPath, buffer);
     } catch (e) {
@@ -247,7 +264,7 @@ function makeStickerFromVideoBuffer(buffer) {
       `-vf "crop='min(iw,ih)':'min(iw,ih)',scale=512:512:flags=lanczos,fps=15" ` +
       `-t 6 -an -c:v libwebp -preset picture -q:v 50 -loop 0 "${outputPath}"`;
 
-    exec(cmd, (err) => {
+    exec(cmd, (err, stdout, stderr) => {
       try {
         if (err) {
           return reject(err);
@@ -266,7 +283,7 @@ function makeStickerFromVideoBuffer(buffer) {
 
 // ---------------- Bot ----------------
 async function connectBot() {
-  // usa auth_info.json (arquivo único) conforme solicitado
+  // usa pasta auth_info/ com useMultiFileAuthState
   const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname, "auth_info"));
   const sock = makeWASocket({ auth: state });
 
@@ -276,23 +293,27 @@ async function connectBot() {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      console.log("📱 Escaneie o QR Code:");
-      qrcode.generate(qr, { small: true });
-    }
-    if (connection === "close") {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log("❌ Conexão encerrada. Reconectando?", shouldReconnect);
-      if (shouldReconnect) {
-        // Ao reconectar, uma nova instância de socket será criada,
-        // e essa nova instância terá startTime atual, assim não reprocessamos backlog.
-        setTimeout(() => connectBot(), 3000);
+    try {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        console.log("📱 Escaneie o QR Code:");
+        qrcode.generate(qr, { small: true });
       }
-    } else if (connection === "open") {
-      console.log("✅ Bot conectado!");
-      // atualiza startTime para ignorar mensagens anteriores à abertura
-      sock.startTime = Date.now();
+      if (connection === "close") {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        console.log("❌ Conexão encerrada. Reconectando?", shouldReconnect);
+        if (shouldReconnect) {
+          // Ao reconectar, uma nova instância de socket será criada,
+          // e essa nova instância terá startTime atual, assim não reprocessamos backlog.
+          setTimeout(() => connectBot(), 3000);
+        }
+      } else if (connection === "open") {
+        console.log("✅ Bot conectado!");
+        // atualiza startTime para ignorar mensagens anteriores à abertura
+        sock.startTime = Date.now();
+      }
+    } catch (e) {
+      console.error("Erro no connection.update:", e);
     }
   });
 
@@ -329,10 +350,14 @@ async function connectBot() {
       const sender = msg.key.participant || msg.key.remoteJid;
 
       // Contagem de mensagens (para !top5) — persistente agora
-      msgCount[sender] = (msgCount[sender] || 0) + 1;
-      saveJSON(top5File, msgCount);
+      try {
+        msgCount[sender] = (msgCount[sender] || 0) + 1;
+        saveJSON(top5File, msgCount);
+      } catch (e) {
+        console.error("Erro ao atualizar contador msgCount:", e);
+      }
 
-      const textRaw = getTextFromMsg(msg).trim();
+      const textRaw = (getTextFromMsg(msg) || "").trim();
       const text = textRaw.toLowerCase();
       const mentionsFromMsg = getMentionsFromMsg(msg);
 
@@ -415,7 +440,7 @@ async function connectBot() {
               await sock.sendMessage(from, { sticker: webpBuffer, mimetype: "image/webp" }, { quoted: msg });
             } catch (err) {
               console.error("Erro ffmpeg:", err);
-              await sock.sendMessage(from, { text: "❌ Erro ao criar figurinha de vídeo." }, { quoted: msg });
+              await sock.sendMessage(from, { text: "❌ Erro ao criar figurinha de vídeo (verifique se ffmpeg está instalado e no PATH)." }, { quoted: msg });
             }
           }
         } catch (err) {
@@ -430,7 +455,7 @@ async function connectBot() {
         if (mentions.length >= 2) {
           const shipPercentage = Math.floor(Math.random() * 101);
           const response = `💘 Ship entre *@${mentions[0].split("@")[0]}* e *@${mentions[1].split("@")[0]}* é de *${shipPercentage}%*!`;
-          await sock.sendMessage(from, { text: response, mentions });
+          await sock.sendMessage(from, { text: response, mentions: [mentions[0], mentions[1]] });
         } else {
           await sock.sendMessage(from, { text: "⚠️ Use: !ship @pessoa1 @pessoa2" }, { quoted: msg });
         }
@@ -539,53 +564,73 @@ async function connectBot() {
           }
         }
       }
-
-      // ---------------- YouTube (apenas PV) ----------------
+// ---------------- YouTube (apenas PV) ----------------
 if (text.startsWith("!youtube")) {
   if (from.endsWith("@g.us")) {
     await sock.sendMessage(from, { text: "❌ Este comando só funciona no PV." }, { quoted: msg });
-  } else {
-    const args = textRaw.split(" ");
-    if (args.length < 2) {
-      await sock.sendMessage(from, { text: "⚠️ Use: !youtube <link>" }, { quoted: msg });
-    } else {
-      try {
-        const url = args[1];
+    return;
+  }
 
-        // Verifica se é um link válido do YouTube
-        if (!playdl.yt_validate(url)) {
-          await sock.sendMessage(from, { text: "❌ Link inválido do YouTube." }, { quoted: msg });
-          return;
-        }
+  const args = textRaw.split(" ");
+  if (args.length < 2) {
+    await sock.sendMessage(from, { text: "⚠️ Use: !youtube <link>" }, { quoted: msg });
+    return;
+  }
 
-        // Obtém informações do vídeo
-        const info = await playdl.video_info(url);
-        const title = info.video_details.title;
+  const url = args[1];
 
-        // Baixa o áudio em buffer
-        const stream = await playdl.stream(url, { quality: 128 });
-        const chunks = [];
+  try {
+    // 🔹 Carrega e limpa cookies
+    let cookies = fs.readFileSync("./cookies.txt", "utf-8");
+    cookies = cookies
+      .replace(/\r?\n|\r/g, "; ")
+      .replace(/\t/g, " ")
+      .replace(/"+/g, "")
+      .replace(/;+$/g, "")
+      .trim();
 
-        stream.stream.on("data", (chunk) => chunks.push(chunk));
-        stream.stream.on("end", async () => {
-          const buffer = Buffer.concat(chunks);
-          await sock.sendMessage(
-            from,
-            { audio: buffer, mimetype: "audio/mpeg", fileName: `${title}.mp3` },
-            { quoted: msg }
-          );
-        });
+    await playdl.setToken({ youtube: { cookie: cookies } });
+    console.log("✅ Cookies do YouTube carregados com sucesso!");
 
-        stream.stream.on("error", async (e) => {
-          console.error("Erro stream YouTube:", e);
-          await sock.sendMessage(from, { text: "❌ Erro ao baixar o áudio." }, { quoted: msg });
-        });
-
-      } catch (err) {
-        console.error("Erro no YouTube:", err);
-        await sock.sendMessage(from, { text: "❌ Erro ao baixar o áudio." }, { quoted: msg });
+    // 🔹 Validação básica do link
+    if (typeof playdl.yt_validate === "function") {
+      if (!playdl.yt_validate(url)) {
+        await sock.sendMessage(from, { text: "❌ Link inválido do YouTube." }, { quoted: msg });
+        return;
       }
     }
+
+    // 🔹 Obtém informações do vídeo
+    const info = await playdl.video_info(url);
+    const title = info?.video_details?.title || "audio";
+
+    // 🔹 Baixa o áudio
+    const stream = await playdl.stream(url, { quality: 128 });
+    const reader = stream.stream;
+    const chunks = [];
+    reader.on("data", (chunk) => chunks.push(chunk));
+    reader.on("end", async () => {
+      try {
+        const buffer = Buffer.concat(chunks);
+        await sock.sendMessage(
+          from,
+          { audio: buffer, mimetype: "audio/mpeg", fileName: `${title}.mp3` },
+          { quoted: msg }
+        );
+      } catch (e) {
+        console.error("Erro ao enviar áudio:", e);
+        await sock.sendMessage(from, { text: "❌ Erro ao enviar o áudio." }, { quoted: msg });
+      }
+    });
+
+    reader.on("error", async (e) => {
+      console.error("Erro stream YouTube:", e);
+      await sock.sendMessage(from, { text: "❌ Erro ao baixar o áudio." }, { quoted: msg });
+    });
+
+  } catch (err) {
+    console.error("Erro no YouTube:", err);
+    await sock.sendMessage(from, { text: "❌ Erro ao baixar o áudio (verifique se o cookie está válido)." }, { quoted: msg });
   }
 }
 
@@ -783,11 +828,16 @@ if (text.startsWith("!youtube")) {
           await sock.sendMessage(from, { text: "🚫 Apenas administradores podem usar esse comando." }, { quoted: msg });
         } else {
           const action = text === "!fechargp" ? "announcement" : "not_announcement";
-          await sock.groupSettingUpdate(from, action);
-          await sock.sendMessage(
-            from,
-            { text: action === "announcement" ? "🔒 Grupo fechado (apenas admins podem enviar mensagens)." : "🔓 Grupo aberto (todos podem enviar mensagens)." }
-          );
+          try {
+            await sock.groupSettingUpdate(from, action);
+            await sock.sendMessage(
+              from,
+              { text: action === "announcement" ? "🔒 Grupo fechado (apenas admins podem enviar mensagens)." : "🔓 Grupo aberto (todos podem enviar mensagens)." }
+            );
+          } catch (e) {
+            console.error("Erro ao atualizar configuração do grupo:", e);
+            await sock.sendMessage(from, { text: "❌ Erro ao alterar as configurações do grupo." }, { quoted: msg });
+          }
         }
       }
 
@@ -816,14 +866,6 @@ if (text.startsWith("!youtube")) {
   return sock;
 }
 
-connectBot();
-
-// ===================================================================================
-// Documentação / Notas (mantidas do seu arquivo original):
-// - Usei useSingleFileAuthState com 'auth_info.json' (arquivo único) conforme você pediu.
-// - top5.json guarda o contador msgCount e é salvo a cada mensagem para persistência.
-// - Ao reconectar, uma nova instância de socket é criada e a propriedade startTime
-//   do socket (definida em connectBot) garante que mensagens anteriores à reconexão sejam ignoradas.
-// - Mantive intactas todas as funcionalidades originais: stickers (!s), ship, idgrupo, ppt,
-//   top5, youtube (PV), piada, curiosidade, maisgado/maiscorno, ranks top3, X1 (persistente), fechargp/abrirgp, ligar/desligar, ping.
-// ===================================================================================
+connectBot().catch((e) => {
+  console.error("Erro ao conectar bot:", e);
+});
